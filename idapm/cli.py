@@ -3,8 +3,6 @@
 
 import argparse
 import colorama
-import json
-import os
 
 from . import installer
 from . import config
@@ -12,8 +10,9 @@ from colorama import Fore
 
 
 def cmd_check(args):
-    print('IDA plugin dir:    {0}'.format(installer.get_plugin_dir()))
     c = config.Config()
+    print('IDA plugin dir:    {0}'.format(installer.get_plugin_dir(c)))
+    print('IDA version:       {0}'.format(c.get_version()))
     print('idapm config path: {0}'.format(c.config_path))
 
 
@@ -21,7 +20,7 @@ def cmd_init(args):
     c = config.Config()
     if not c.check_exists():
         try:
-            c.make_config()
+            c.make_config(args.version)
             print(Fore.CYAN + '~/idapm.json was created successfully!')
 
         except:
@@ -29,6 +28,10 @@ def cmd_init(args):
 
     else:
         print('~/idapm.json already exists...')
+
+        if args.version and int(args.version) > 0:
+            c.update_version(args.version)
+
         input_pattern = {'y': True, 'yes': True, 'n': False, 'no': False}
         while True:
             try:
@@ -73,15 +76,11 @@ def cmd_install(args):
                     pass
 
         print('----------------------')
-        repo_https_url = 'https://github.com/{0}.git'.format(args.plugin_name)
-        print('Try: git clone {0}'.format(repo_https_url))
-        if installer.install_from_github(args.plugin_name, repo_https_url):
+        if installer.install_from_github(args.plugin_name):
             c.add_plugin(args.plugin_name)
-
         else:
             repo_ssh_url = 'git@github.com:{0}.git'.format(args.plugin_name)
-            print('Try: git clone {0}'.format(repo_ssh_url))
-            if installer.install_from_github(args.plugin_name, repo_ssh_url):
+            if installer.install_from_github(repo_ssh_url):
                 c.add_plugin(args.plugin_name)
 
 
@@ -98,6 +97,7 @@ def main():
     parser_check.set_defaults(handler=cmd_check)
 
     parser_init = subparsers.add_parser('init', help='')
+    parser_init.add_argument('--version', '-v', default=700, help='Version of IDA')
     parser_init.set_defaults(handler=cmd_init)
 
     parser_install = subparsers.add_parser('install', aliases=['i'], help='')

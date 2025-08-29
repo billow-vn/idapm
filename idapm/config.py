@@ -2,8 +2,7 @@
 # coding: UTF-8
 
 import json
-import os
-
+from pathlib import Path
 from os.path import expanduser
 
 
@@ -11,10 +10,10 @@ class Config(object):
 
     def __init__(self):
         home_dir = expanduser("~")
-        self.config_path = home_dir + '/idapm.json'
+        self.config_path = Path(home_dir).joinpath('idapm.json')
 
     def check_duplicate(self, plugin_repo):
-        with open(self.config_path, 'r+') as f:
+        with open(str(self.config_path.absolute()), 'r+') as f:
             config_json = json.load(f)
             if plugin_repo not in config_json['plugins']:
                 return False
@@ -22,15 +21,15 @@ class Config(object):
             return True
 
     def check_exists(self):
-        return os.path.isfile(self.config_path)
+        return self.config_path.exists(follow_symlinks=True)
 
-    def make_config(self):
-        config_json = {'plugins': []}
-        with open(self.config_path, 'w') as f:
+    def make_config(self, version: str | int | None = 700) -> None:
+        config_json = {'plugins': [], 'version': int(version or 700)}
+        with open(str(self.config_path.absolute()), 'w') as f:
             json.dump(config_json, f, indent=2)
 
     def add_plugin(self, plugin_repo):
-        with open(self.config_path, 'r+') as f:
+        with open(str(self.config_path.absolute()), 'r+') as f:
             config_json = json.load(f)
             if plugin_repo not in config_json['plugins']:
                 config_json['plugins'].append(plugin_repo)
@@ -41,8 +40,27 @@ class Config(object):
             else:
                 return False
 
+    def update_version(self, version: str | int | None = 700):
+        version = int(version or 700)
+        with open(str(self.config_path.absolute()), 'r+') as f:
+            config_json = json.load(f)
+            config_json['version'] = version if version > 700 else 700
+            f.seek(0)
+            json.dump(config_json, f, indent=2)
+            return True
+
+    def get_version(self):
+        with open(str(self.config_path.absolute()), 'r+') as f:
+            config_json = json.load(f)
+
+            version = None
+            if 'version' in config_json:
+                version = config_json['version']
+
+            return int(version or 700)
+
     def list_plugins(self):
-        with open(self.config_path, 'r+') as f:
+        with open(str(self.config_path.absolute()), 'r+') as f:
             config_json = json.load(f)
             no_duplicate_plugins = list(set(config_json['plugins']))
             config_json['plugins'] = no_duplicate_plugins

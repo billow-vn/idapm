@@ -1,127 +1,183 @@
 #!/usr/bin/env python3
 # coding: UTF-8
 
-import copy
 import glob
-import json
 import os
 import platform
 import shlex
 import shutil
 import subprocess
+from pathlib import Path
+import re
 
 from . import config
 from colorama import Fore
 from os.path import expanduser
 
 
-def get_plugin_dir():
+def parse_repo(repo: str) -> tuple[str, str]:
+    """
+    return (repo_name, repo_url)
+
+    Example for repo format:
+      - 'user/repo'
+      - 'repo'
+      - 'https://github.com/user/repo(.git)'
+      - 'git@github.com:user/repo(.git)'
+    """
+
+    m = re.match(r"(?:https://[^/]+/|git@[^:]+:)([^/]+/[^/]+?)(?:\.git)?$", repo)
+    if m:
+        repo_name = m.group(1)
+        repo_url = repo
+        return repo_name, repo_url
+
+    if "/" in repo:
+        repo_name = repo
+    else:
+        repo_name = f"{repo}/{repo}"
+
+    repo_url = f"https://github.com/{repo_name}.git"
+    return repo_name, repo_url
+
+
+def get_ida_version(c: config.Config | None = None) -> int | None:
+    c = c or config.Config()
+
+    return c.get_version()
+
+
+def find_ida_home() -> str | Path | None:
     platform_name = platform.system()
+    ida_paths = []
     if platform_name == 'Darwin':
-        ida_root_list = glob.glob('/Applications/IDA*')
-        if len(ida_root_list) == 1:
-            ida_root_path = ida_root_list[0]
-            ida_plugins_dir = os.path.join(ida_root_path, 'ida.app/Contents/MacOS/plugins')
-            return ida_plugins_dir
-
+        ida_paths.extend(glob.glob(r'/Applications/IDA*/Contents/MacOS'))
     elif platform_name == 'Windows':
-        ida_dir_list = ['C:\Program Files\IDA*', 'C:\Program Files (x86)\IDA*']
-        ida_root_list = []
-
-        for ida_dir in ida_dir_list:
-            ida_root_list.extend(glob.glob(ida_dir))
-            if len(ida_root_list) == 1:
-                ida_root_path = ida_root_list[0]
-                ida_plugins_dir = os.path.join(ida_root_path, 'plugins')
-                return ida_plugins_dir
-    
+        ida_paths.extend(glob.glob(r'C:\Program Files*\IDA*'))
     elif platform_name == 'Linux':
-        home_dir = expanduser("~")
-        ida_root_list = glob.glob(os.path.join(home_dir, 'ida*'))
-        ida_root_list = [i for i in ida_root_list if not i.endswith('idapm.json')]
-        if len(ida_root_list) == 1:
-            ida_root_path = ida_root_list[0]
-            ida_plugins_dir = os.path.join(ida_root_path, 'plugins')
-            return ida_plugins_dir
+        home_dir = expanduser('~')
+        ida_paths.extend(glob.glob(os.path.join(home_dir, 'ida*')))
+
+    ida_paths = [i for i in ida_paths if not i.endswith('idapm.json')]
+
+    return ida_paths[0] if ida_paths[0] else None
+
+
+def find_ida_home_base(ida_home: str | Path | None = None) -> Path | str | None:
+    ida_home = Path(ida_home) if ida_home else find_ida_home()
+    platform_name = platform.system()
+    if platform_name == 'Darwin' and ida_home:
+        ida_home = str(ida_home.absolute()).replace('/Contents/MacOS/plugins', '')
+        ida_home = Path(ida_home)
+
+    return ida_home
+
+
+def get_plugin_dir(c: config.Config | None = None) -> Path | None:
+    c = c or config.Config()
+
+    platform_name = platform.system()
+    ida_home = find_ida_home()
+    ida_home = Path(ida_home) if ida_home else None
+
+    ida_home_base = find_ida_home_base(ida_home)
+    ida_home_base = Path(ida_home_base) if ida_home_base else None
+    ida_version = get_ida_version(c)
+
+    if ida_version <= 700:
+        if platform_name == 'Darwin':
+            return Path(ida_home_base, 'ida.app/Contents/MacOS/plugins')
+        elif platform_name == 'Windows':
+            return Path(ida_home, 'plugins')
+        elif platform_name == 'Linux':
+            return Path(ida_home, 'plugins')
+    else:
+        home_dir = expanduser('~')
+        if platform_name == 'Windows':
+            return Path(os.getenv('APPDATA'), 'Hex-Rays/IDA Pro/plugins')
+        else:
+            return Path(home_dir, '.idapro/plugins')
 
     return None
 
 
-def get_top_py_dir(py_path_list, ida_plugins_dir):
-    result_dir = '.'
-    flag = False
-    for py_path in py_path_list:
-        p = py_path.replace(ida_plugins_dir, '').replace('\\', '/').split('/')[3:]
-        if len(p) == 2:
-            flag = True
-        else:
-            if (p[1] != 'test') and (p[1] != 'tests'):
-                result_dir = p[1]
-    
-    if flag:
-        return None
-    else:
-        return result_dir
+def install_from_local(dir_name, c: config.Config | None = None, symlinks: bool | None = False) -> bool:
+    c = c or config.Config()
 
-
-def install_from_local(dir_name):
-    ida_plugins_dir = get_plugin_dir()
+    ida_plugins_dir = get_plugin_dir(c)
     if ida_plugins_dir is None:
         print(Fore.RED + 'Your OS is unsupported...')
         return False
-    
-    py_file_list = glob.glob(os.path.join(dir_name, '**/*.py'), recursive=True)
-    for py_file_path in py_file_list:
-        py_file_name = os.path.basename(py_file_path)
-        plugin_file_path = os.path.join(ida_plugins_dir, py_file_name)
-        shutil.copyfile(py_file_path, plugin_file_path)
-        print('Copy to {0} from {1}'.format(plugin_file_path, py_file_path))
+
+    dir_path = Path(dir_name)
+    for file_target_path in dir_path.glob('**/*.py', recurse_symlinks=True):
+        file_rel_path = file_target_path.relative_to(dir_path)
+
+        if file_rel_path.parents[0] == ".":
+            dst = ida_plugins_dir.joinpath(
+                file_rel_path
+            )
+
+            src = file_target_path
+        else:
+            folder_name = file_rel_path.parts[0]
+            dst = ida_plugins_dir.joinpath(folder_name)
+            if dst.exists():
+                continue
+
+            src = dir_path.joinpath(folder_name)
+
+        try:
+            if not symlinks:
+                shutil.copyfile(src, dst)
+                print('Copy to {0} from {1}'.format(src, dst))
+            else:
+                os.symlink(src, dst)
+                print('Symlink to {0} from {1}'.format(src, dst))
+        except FileExistsError:
+            print('File {0} already exists'.format(dst))
 
     print(Fore.CYAN + 'Installed successfully!')
     return True
 
 
-def install_from_github(repo_name, repo_url):
+def install_from_github(repo: str, c: config.Config | None = None):
     '''
     After git clone plugin in ida_plugins_dir/idapm, and create a symbolic link to the python file from ida_plugins_dir
+    Only links *.py files in root and the first parent directory containing *.py files.
     '''
-    ida_plugins_dir = get_plugin_dir()
-    if ida_plugins_dir is not None:
+    c = c or config.Config()
+    (repo_name, repo_url) = parse_repo(repo)
+
+    print('Try: git clone {0}'.format(repo_url))
+
+    ida_plugins_dir = get_plugin_dir(c)
+    idapm_path = ida_plugins_dir.parent.joinpath('idapm')
+    if ida_plugins_dir.exists():
         repo_name = shlex.quote(repo_name)  # Countermeasures for command injection
-        installed_path = os.path.join(ida_plugins_dir, 'idapm', repo_name)
-        proc = subprocess.Popen(['git', 'clone', repo_url, installed_path], stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE)
-        outs, errs = proc.communicate()
-        if (outs is not None) and (len(outs) != 0):
-            msg = outs.decode('ascii').replace('\n', '')
-            print(msg)
+        installed_path = idapm_path.joinpath(repo_name).absolute()
+        if not installed_path.exists():
+            proc = subprocess.Popen(
+                [
+                    r'git', r'clone',
+                    repo_url,
+                    str(installed_path)
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            outs, errs = proc.communicate()
+            if (outs is not None) and (len(outs) != 0):
+                msg = outs.decode('ascii').replace('\n', '')
+                print(msg)
 
-        if (errs is not None) and (len(errs) != 0):
-            msg = errs.decode('ascii').replace('\n', '')
-            print(msg)
-            if ('Repository not found' in msg) or ('already exists and is not an empty directory' in msg):
-                return False
+            if (errs is not None) and (len(errs) != 0):
+                msg = errs.decode('ascii').replace('\n', '')
+                print(msg)
+                if ('Repository not found' in msg) or ('already exists and is not an empty directory' in msg):
+                    return False
 
-        py_file_list = glob.glob(os.path.join(installed_path, '**/*.py'), recursive=True)
-        top_dir = get_top_py_dir(py_file_list, ida_plugins_dir)
-        for py_file_path in py_file_list:
-            py_file_path = py_file_path.replace('\\', '/')
-            py_file_name = os.path.basename(py_file_path)
-            symlink_dir = os.path.dirname(py_file_path)
-            symlink_dir_list = symlink_dir.split('/')
-            if (symlink_dir_list[-1] != 'test') and (symlink_dir_list[-1] != 'tests'):
-                symlink_dir = symlink_dir.replace('/'+repo_name, '').replace('/idapm', '')
-                if top_dir is not None:
-                   symlink_dir = symlink_dir.replace('/'+top_dir, '')
-                symlink_path = os.path.join(symlink_dir, py_file_name)
-                if not os.path.exists(symlink_path):
-                    parent_dir = os.path.dirname(py_file_path)
-                    if not os.path.exists(parent_dir):
-                        os.makedirs(parent_dir)
-                    os.symlink(py_file_path, symlink_path)
-                    print('Symbolic link has been created ({0}).'.format(symlink_path))
-
-        print(Fore.CYAN + 'Installed successfully!')
+        install_from_local(installed_path, c, symlinks=True)
         return True
 
     else:
@@ -129,90 +185,40 @@ def install_from_github(repo_name, repo_url):
         return False
 
 
-def list_plugins():
+def list_plugins(c: config.Config | None = None) -> tuple[list[str], list[str]] | None:
+    c = c or config.Config()
+
     platform_name = platform.system()
+    ida_plugins_dir = get_plugin_dir(c)
+
+    exclude_files = {
+        'plugins.cfg',
+        'bochs',
+        'idapm',
+        'platformthemes',
+        'hexrays_sdk',
+    }
+
     if platform_name == 'Darwin':
-        exclude_files = {
-            'plugins.cfg', 'hexrays_sdk', 'bochs', 'idapm'
-        }
-        ida_root_list = glob.glob('/Applications/IDA*')
-        if len(ida_root_list) == 1:
-            ida_root_path = ida_root_list[0]
-            ida_plugins_dir = os.path.join(ida_root_path, 'ida.app/Contents/MacOS/plugins')
-            added_plugins = set(os.listdir(ida_plugins_dir)) - exclude_files
-            added_plugins = [i for i in added_plugins if (not i.endswith('.dylib')) and (not i.endswith('.h'))]
-            print(Fore.CYAN + 'List of scripts in IDA plugin directory')
-            if len(added_plugins) == 0:
-                print('None')
-            else:
-                for plugin in added_plugins:
-                    print(plugin)
-
-            print(Fore.CYAN + '\nList of plugins in config')
-            c = config.Config()
-            plugin_repos = c.list_plugins()
-            if len(plugin_repos) == 0:
-                print('None')
-            else:
-                for plugin in plugin_repos:
-                    print(plugin)
-
+        plugin_added = set(os.listdir(ida_plugins_dir)) - exclude_files
+        plugin_added = [i for i in plugin_added if (not i.endswith('.dylib')) and (not i.endswith('.h'))]
     elif platform_name == 'Windows':
-        exclude_files = {
-            'plugins.cfg', 'idapm'
-        }
-        ida_dir_list = ['C:\Program Files\IDA*', 'C:\Program Files (x86)\IDA*']
-        ida_root_list = []
-        for ida_dir in ida_dir_list:
-            ida_root_list.extend(glob.glob(ida_dir))
-
-        if len(ida_root_list) == 1:
-            ida_root_path = ida_root_list[0]
-            ida_plugins_dir = os.path.join(ida_root_path, 'plugins')
-            added_plugins = set(os.listdir(ida_plugins_dir)) - exclude_files
-            added_plugins = [i for i in added_plugins if not i.endswith('.dll')]
-            print(Fore.CYAN + 'List of scripts in IDA plugin directory')
-            if len(added_plugins) == 0:
-                print('None')
-            else:
-                for plugin in added_plugins:
-                    print(plugin)
-
-            print(Fore.CYAN + '\nList of plugins in config')
-            c = config.Config()
-            plugin_repos = c.list_plugins()
-            if len(plugin_repos) == 0:
-                print('None')
-            else:
-                for plugin in plugin_repos:
-                    print(plugin)
-    
+        plugin_added = set(os.listdir(ida_plugins_dir)) - exclude_files
+        plugin_added = [i for i in plugin_added if not i.endswith('.dll')]
     elif platform_name == 'Linux':
-        exclude_files = {
-            'platformthemes', 'platforms', 'plugins.cfg', 'idapm'
-        }
-        home_dir = expanduser("~")
-        ida_root_list = glob.glob(os.path.join(home_dir, 'ida*'))
-        ida_root_list = [i for i in ida_root_list if not i.endswith('idapm.json')]
-        if len(ida_root_list) == 1:
-            ida_root_path = ida_root_list[0]
-            ida_plugins_dir = os.path.join(ida_root_path, 'plugins')
-            added_plugins = set(os.listdir(ida_plugins_dir)) - exclude_files
-            added_plugins = [i for i in added_plugins if not i.endswith('.so')]
-            print(Fore.CYAN + 'List of scripts in IDA plugin directory')
-            if len(added_plugins) == 0:
-                print('None')
-            else:
-                for plugin in added_plugins:
-                    print(plugin)
-
-            print(Fore.CYAN + '\nList of plugins in config')
-            c = config.Config()
-            plugin_repos = c.list_plugins()
-            if len(plugin_repos) == 0:
-                print('None')
-            else:
-                for plugin in plugin_repos:
-                    print(plugin)
+        plugin_added = set(os.listdir(ida_plugins_dir)) - exclude_files
+        plugin_added = [i for i in plugin_added if not i.endswith('.so')]
     else:
         print('Your OS is unsupported...')
+        return None
+
+    print(Fore.CYAN + 'List of scripts in IDA plugin directory:')
+    for plugin in plugin_added or []:
+        print(' - %s' % plugin)
+
+    print(Fore.CYAN + '\nList of plugins in config:')
+    plugin_repos = c.list_plugins()
+    for plugin in plugin_repos or []:
+        print(' - %s' % plugin)
+
+    return plugin_repos, plugin_added
