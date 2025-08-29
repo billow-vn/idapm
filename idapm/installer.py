@@ -101,8 +101,9 @@ def get_plugin_dir(c: config.Config | None = None) -> Path | None:
     return None
 
 
-def install_from_local(dir_name, c: config.Config | None = None, symlinks: bool | None = False) -> bool:
+def install_from_local(dir_name, c: config.Config | None = None, symlinks: bool | None = True) -> bool:
     c = c or config.Config()
+    symlinks = symlinks if symlinks is not None else True
 
     ida_plugins_dir = get_plugin_dir(c)
     if ida_plugins_dir is None:
@@ -141,7 +142,7 @@ def install_from_local(dir_name, c: config.Config | None = None, symlinks: bool 
     return True
 
 
-def install_from_github(repo: str, c: config.Config | None = None):
+def install_from_github(repo: str, c: config.Config | None = None, symlinks: bool | None = True):
     '''
     After git clone plugin in ida_plugins_dir/idapm, and create a symbolic link to the python file from ida_plugins_dir
     Only links *.py files in root and the first parent directory containing *.py files.
@@ -177,7 +178,7 @@ def install_from_github(repo: str, c: config.Config | None = None):
                 if ('Repository not found' in msg) or ('already exists and is not an empty directory' in msg):
                     return False
 
-        install_from_local(installed_path, c, symlinks=True)
+        install_from_local(installed_path, c, symlinks=symlinks)
         return True
 
     else:
